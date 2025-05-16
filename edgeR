@@ -1,0 +1,127 @@
+library(edgeR)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+
+# 1. 读入计数矩阵
+counts <- read.table("counts_matrix.txt", header = TRUE, row.names = 1)
+
+# 2. 分组信息
+group <- factor(c("MII", "MII", 
+                  "2C", "2C", 
+                  "4C", "4C",
+                  "8C", "8C",
+                  "Morula", "Morula",
+                  "EarlyBlastocyst", "EarlyBlastocyst",
+                  "ExpandBlastocyst", "ExpandBlastocyst",
+                  "16C", "16C"))
+
+# 3. 创建DGE对象
+dge <- DGEList(counts=counts, group=group)
+
+# 4. 过滤低表达基因
+keep <- filterByExpr(dge, group=group)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+
+# 5. 归一化
+dge <- calcNormFactors(dge)
+
+# 6. 设计矩阵
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+# 7. 估算离散度&拟合
+
+# ----------------整体差异检验----------------
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+lrt_overall <- glmLRT(fit)
+results_overall <- topTags(lrt_overall, n=Inf)$table
+write.table(results_overall, file="DEG_overall_LRT.txt", sep="\t", quote=FALSE)
+
+# 提取动态基因 (FDR<0.05 & |logFC|>1)
+dynamic_genes <- rownames(results_overall)[results_overall$FDR < 0.05]
+
+# ----------------热图绘制----------------
+expr_logcpm <- cpm(dge, log=TRUE)
+expr_dynamic <- expr_logcpm[dynamic_genes, ]
+
+# 聚类热图
+pheatmap(expr_dynamic, 
+         cluster_rows=TRUE, cluster_cols=TRUE, 
+         show_rownames=FALSE,
+         color=colorRampPalette(brewer.pal(9, "RdBu"))(100),
+         main="Dynamic Genes Heatmap")
+
+# ----------------两两对比批量跑----------------
+
+# 定义组名
+stages <- levels(group)
+
+# 创建输出文件夹
+dir.create("pairwise_DEGs", showWarnings = FALSE)
+
+two_group_contrasts <- combn(stages, 2, simplify=FALSE)
+
+for (pair in two_group_contrasts) {
+  group1 <- pair[1]
+  group2 <- pair[2]
+  
+  contrast_vec <- rep(0, length(stages))
+  contrast_vec[which(stages == group1)] <- -1
+  contrast_vec[which(stages == group2)] <- 1
+  
+  lrt <- glmLRT(fit, contrast=contrast_vec)
+  res <- topTags(lrt, n=Inf)$table
+  
+  # 保存全部结果
+  fname_all <- paste0("pairwise_DEGs/", group2, "_vs_", group1, "_all.txt")
+  write.table(res, file=fname_all, sep="\t", quote=FALSE)
+  
+  # 提取DEGs
+  degs <- res[res$FDR < 0.05 & abs(res$logFC) > 1, ]
+  fname_deg <- paste0("pairwise_DEGs/", group2, "_vs_", group1, "_DEGs.txt")
+  write.table(degs, file=fname_deg, sep="\t", quote=FALSE)
+  
+  # 火山图
+  res$threshold <- as.factor(res$FDR < 0.05 & abs(res$logFC) > 1)
+  p <- ggplot(res, aes(x=logFC, y=-log10(FDR), color=threshold)) +
+    geom_point(alpha=0.5) +
+    scale_color_manual(values=c("grey", "red")) +
+    theme_minimal() +
+    labs(title=paste(group2, "vs", group1), x="log2 Fold Change", y="-log10 FDR")
+  
+  ggsave(paste0("pairwise_DEGs/", group2, "_vs_", group1, "_volcano.png"), p, width=5, height=5)
+}
+
+
+# ----------------单组 vs 其他所有组对比----------------
+
+dir.create("one_vs_all_DEGs", showWarnings = FALSE)
+
+for (stage in stages) {
+  contrast_vec <- ifelse(stages == stage, 1, -1 / (length(stages) - 1))
+  
+  lrt <- glmLRT(fit, contrast=contrast_vec)
+  res <- topTags(lrt, n=Inf)$table
+  
+  # 保存全部结果
+  fname_all <- paste0("one_vs_all_DEGs/", stage, "_vs_others_all.txt")
+  write.table(res, file=fname_all, sep="\t", quote=FALSE)
+  
+  # 提取DEGs
+  degs <- res[res$FDR < 0.05 & abs(res$logFC) > 1, ]
+  fname_deg <- paste0("one_vs_all_DEGs/", stage, "_vs_others_DEGs.txt")
+  write.table(degs, file=fname_deg, sep="\t", quote=FALSE)
+  
+  # 火山图
+  res$threshold <- as.factor(res$FDR < 0.05 & abs(res$logFC) > 1)
+  p <- ggplot(res, aes(x=logFC, y=-log10(FDR), color=threshold)) +
+    geom_point(alpha=0.5) +
+    scale_color_manual(values=c("grey", "blue")) +
+    theme_minimal() +
+    labs(title=paste(stage, "vs Others"), x="log2 Fold Change", y="-log10 FDR")
+  
+  ggsave(paste0("one_vs_all_DEGs/", stage, "_vs_others_volcano.png"), p, width=5, height=5)
+}
+
